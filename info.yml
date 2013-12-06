@@ -36,5 +36,5 @@ supported_engines: ["tk-shell"]
 
 # the frameworks required to run this app
 frameworks:
-    - {"name": "tk-framework-perforce", "version": "v0.0.2"}
+    - {"name": "tk-framework-perforce", "version": "v0.0.4"}
     

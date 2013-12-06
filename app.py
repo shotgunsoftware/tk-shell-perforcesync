@@ -22,7 +22,7 @@ class PerforceSync(sgtk.platform.Application):
         """
         Called as the application is being initialized
         """
-        #self.engine.register_command("Sync", self.sync_changes)
+        self.log_debug("%s: Initializing..." % self)
         
         # register commands:
         #
@@ -48,11 +48,16 @@ class PerforceSync(sgtk.platform.Application):
         """
         # parse change_str to get change range to sync:
         # ...
+        start_change = None
+        end_change = None
         
-        # sync changes:
-        tk_shell_perforcesync = self.import_module("tk_shell_perforcesync")
-        sync_handler = tk_shell_perforcesync.ShotgunSync(self)
-        sync_handler.sync_changes(0, 0)
+        
+        
+        if start_change != None:
+            # sync changes:
+            tk_shell_perforcesync = self.import_module("tk_shell_perforcesync")
+            sync_handler = tk_shell_perforcesync.ShotgunSync(self)
+            sync_handler.sync_changes(start_change, end_change if end_change != None else start_change)
         
     def sync_changes_daemon(self):
         """
@@ -63,4 +68,4 @@ class PerforceSync(sgtk.platform.Application):
     
     
     def destroy_app(self):
-        self.log_debug("Destroying tk-shell-shotgunsync")
+        self.log_debug("%s: Destroying..." % self)
