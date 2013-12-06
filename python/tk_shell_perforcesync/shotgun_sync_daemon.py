@@ -66,7 +66,7 @@ class ShotgunSyncDaemon(object):
         """
         try:
             p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
-            p4 = p4_fw.connect()
+            p4 = p4_fw.connect(False)
             return p4
         except:
             self._app.log_exception("Failed to connect!")
