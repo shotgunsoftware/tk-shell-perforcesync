@@ -51,6 +51,8 @@ class PerforceSync(sgtk.platform.Application):
         start_change = None
         end_change = None
         
+        start_change = int(change_str)
+        
         
         
         if start_change != None:

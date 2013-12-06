@@ -11,6 +11,8 @@
 """
 """
 
+import time
+import sgtk
 from P4 import P4Exception
 
 from .shotgun_sync import ShotgunSync
@@ -23,8 +25,6 @@ class ShotgunSyncDaemon(object):
     def __init__(self, app):
         """
         """
-        ShotgunSync.__init__(self, app)
-        
         self._app = app
         self._interval = self._app.get_setting("poll_interval")
         self._p4_counter_name = "%s%d" % (ShotgunSyncDaemon.P4_COUNTER_BASE_NAME, self._app.context.project["id"])
@@ -39,10 +39,10 @@ class ShotgunSyncDaemon(object):
             
             self._app.log_info("Checking for new Perforce changes to sync with Shotgun...")
             
-            try:
-                # open connection to perforce:
-                p4 = self._connect_to_perforce()
-                if p4:
+            # open connection to perforce:
+            p4 = self._connect_to_perforce()
+            if p4:            
+                try:
                     # look to see if there are new changes to process:
                     change_range = self._get_new_changes(p4)
                     
@@ -51,11 +51,11 @@ class ShotgunSyncDaemon(object):
                         self._process_changes(change_range[0], change_range[1], p4)
                         
                         # update counter:
-                        self._update_counter(change_range[1], p4)
-                else:
-                    self._app.log_error("Failed to open connection to Perforce server!")
-            finally:
-                self._disconnect()
+                        self._update_perforce_counter(change_range[1], p4)
+                finally:
+                    p4.disconnect()
+            else:
+                self._app.log_error("Failed to open connection to Perforce server!")                    
                         
             # and sleep for a bit:
             self._app.log_debug("Sleeping for %d seconds" % self._interval)
@@ -82,7 +82,7 @@ class ShotgunSyncDaemon(object):
             start_change = int(p4_res[0]["value"])+1 if p4_res else 0
             
             # get highest submitted change from perforce:
-            p4_res = self._p4.run_changes("-m", "1", "-s", "submitted")
+            p4_res = p4.run_changes("-m", "1", "-s", "submitted")
             # [{'status': 'submitted', 'changeType': 'public', 'change': '36', ...}]
             end_change =  int(p4_res[0]["change"])
             
@@ -110,7 +110,7 @@ class ShotgunSyncDaemon(object):
         """
         # update counter:                               
         try:           
-            self._p4.run_counter(self._p4_counter_name, str(change))
+            p4.run_counter(self._p4_counter_name, str(change))
         except P4Exception, e:
             self._app.log_error("Failed to update Perforce counter '%s' - %s" 
                            % (self._p4_counter_name, (p4.errors[0] if p4.errors else e)))

@@ -11,6 +11,9 @@
 """
 """
 
+import os
+import sys
+
 import sgtk
 from P4 import P4Exception
 
@@ -33,7 +36,7 @@ class ShotgunSync(object):
         """
         Sync range of changes:
         """
-        self.log_info("Syncing changes %d - %d..." % (start, end))
+        self._app.log_info("Syncing changes %d - %d..." % (start_change, end_change))
         
         # connect to Perforce:
         p4 = p4 or self._connect_to_perforce()
@@ -44,7 +47,7 @@ class ShotgunSync(object):
                     try:
                         self.sync_change(change_id, p4)
                     except Exception, e:
-                        self.log_error("Failed to sync change %d: %s" % (change_id, e))   
+                        self._app.log_error("Failed to sync change %d: %s" % (change_id, e))   
             finally:
                 # always disconnect:
                 p4.disconnect()
@@ -52,7 +55,7 @@ class ShotgunSync(object):
     def sync_change(self, change_id, p4=None):
         """
         """
-        self.log_info("Syncing change %d" % change_id)
+        self._app.log_info("Syncing change %d" % change_id)
         
         # connect to perforce:
         p4 = p4 or self._connect_to_perforce()
@@ -92,7 +95,7 @@ class ShotgunSync(object):
             file_revs = zip(change_desc.get("depotFile", []), change_desc.get("rev", []))
             for depot_path, rev in file_revs:
                 # process file revision
-                file_details = self._process_file_revision(depot_path, rev, sg_user, change_id)
+                file_details = self._process_file_revision(depot_path, rev, sg_user, change_id, change_desc.get("desc", ""), p4)
             
                 if file_details:
                     published_files.append(file_details)            
@@ -100,26 +103,27 @@ class ShotgunSync(object):
             # and create entity for change:
             change = {}
             change["code"] = change_id
-            change["description"] = change_desc["desc"]
+            change["description"] = change_desc.get("desc", "")
             change["project"] = self._app.context.project
             change["created_by"] = sg_user
             change["sg_published_files"] = [{"type":"PublishedFile", "id":file["sg_file"]["id"]} for file in published_files]
             self._create_or_update_change(change)
             
         except Exception, e:
-            self.log_error(e)    
+            self._app.log_error(e)
+            self._app.log_exception("AARGH")    
 
-    def _process_file_revision(self, depot_path, file_revision, sg_user, change_id):
+    def _process_file_revision(self, depot_path, file_revision, sg_user, change_id, description, p4):
         """
         Process a single revision of a perforce file.  If the file can be mapped to the
         current context's project then create a published file for it and return the
         details. 
         """
         # Determine the depot project root for this depot file:
-        depot_project_root = self._get_depot_project_root(depot_path)
+        depot_project_root = self._get_depot_project_root(depot_path, p4)
         
         # find the pipeline config root from the depot root:
-        local_pc_root = self._get_local_pc_root(depot_project_root)
+        local_pc_root = self._get_local_pc_root(depot_project_root, p4)
         
         # get a tk instance for this pc root:
         tk = self._pc_tk_instances.get(local_pc_root)
@@ -141,20 +145,20 @@ class ShotgunSync(object):
         # build a context for the depot path:
         # (AD) - this is obviously very fragile so need a way to do this using depot paths
         # - maybe be able to set the project root and then set it to depot_project_root?
-        local_path = tk.pipeline_configuration.get_primary_data_root() + depot_file[len(depot_project_root):]
+        local_path = tk.pipeline_configuration.get_primary_data_root() + depot_path[len(depot_project_root):]
         context = self._get_context_for_path(tk, local_path)    
         
         # Register publish for the file:
-        self.log_debug("Registering new published file: %s:%s" % (depot_file, file_revision))
+        self._app.log_debug("Registering new published file: %s:%s" % (depot_path, file_revision))
         sg_res = sgtk.util.register_publish(self._app.sgtk,
                                             context, 
-                                            depot_file, 
+                                            depot_path, 
                                             os.path.basename(local_path), 
                                             int(file_revision), 
-                                            comment = file_revision["description"], 
+                                            comment = description, 
                                             created_by = sg_user)
         
-        file_data = {"depot":depot_file, "local":local_path, "context":context, "sg_file":sg_res}
+        file_data = {"depot":depot_path, "local":local_path, "context":context, "sg_file":sg_res}
         
         return file_data
 
@@ -164,16 +168,16 @@ class ShotgunSync(object):
         # if entity already exists then we just want to update it.  Otherwise we'll
         # end up with multiple entities for the same change!
         filters = [["code", "is", change["code"]], ["project", "is", change["project"]]]
-        sg_res = self._app.sgtk.find_one("Revision", filters)
+        sg_res = self._app.shotgun.find_one("Revision", filters)
         if sg_res:
             # update existing change:
-            self.log_debug("Updating existing Change (Revision) entity: %d" % sg_res["id"])
+            self._app.log_debug("Updating existing Change (Revision) entity: %d" % sg_res["id"])
             # ...
             
         else:
             # create new change:
-            self.log_debug("Creating new Change (Revision) entity for change: %s" % data["code"])
-            self._app.sgtk.shotgun.create("Revision", change)
+            self._app.log_debug("Creating new Change (Revision) entity for change: %s" % data["code"])
+            self._app.shotgun.create("Revision", change)
 
     def _connect_to_perforce(self):
         """
@@ -212,7 +216,7 @@ class ShotgunSync(object):
         # to construct the best possible context and then allow a hook to create a new context if it needs
         # to? 
         
-        context =self._app..sgtk.context_from_path(local_path)
+        context =self._app.sgtk.context_from_path(local_path)
                 
         # if we don't have a task but do have a step then try to determine the task from the step:
         # (TODO) - this logic should be moved to a hook as it  won't work if there are Multiple tasks on 
@@ -225,17 +229,17 @@ class ShotgunSync(object):
         
         return context
         
-    def _get_depot_project_root(self, depot_file, p4):
+    def _get_depot_project_root(self, depot_path, p4):
         """
         Find the depot-relative project root for the specified depot file
         """
-        # first, check to see if depot_file is under a known project root:
+        # first, check to see if depot_path is under a known project root:
         for pr in self._project_roots:
-            if depot_file.startswith(pr):
+            if depot_path.startswith(pr):
                 return pr
         
         # start search from project root:
-        project_root = depot_file
+        project_root = depot_path
         
         while len(project_root):
             project_root = project_root[:project_root.rfind("/") or 0].rstrip("/")
@@ -292,7 +296,7 @@ class ShotgunSync(object):
             local_pc_root = config[0][sys.platform]
             
         except Exception, e:
-            self.log_error("Failed to determine project root: %s" % e)
+            self._app.log_error("Failed to determine project root: %s" % e)
             # any exception is bad!
             return None
         
