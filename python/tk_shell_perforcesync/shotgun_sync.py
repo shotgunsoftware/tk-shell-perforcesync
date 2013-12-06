@@ -177,6 +177,7 @@ class ShotgunSync(object):
 
     def _connect_to_perforce(self):
         """
+        Connect to Perforce
         """
         try:
             p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
@@ -188,17 +189,13 @@ class ShotgunSync(object):
         
     def _get_sg_user(self, tk, perforce_user):
         """
-        Use hook to get user
+        Get the Shotgun user for the specified Perforce user
         """
-        
         if perforce_user not in self._sg_user_lookup:
-            # (TODO) - move to hook/use the perforce framework..
-            sg_res = self._app.shotgun.find_one("HumanUser", [["sg_perforce_user", "is", perforce_user]], ["login"])
-            if not sg_res:
-                # try the login field instead:
-                sg_res =self._app.shotgun.find_one('HumanUser', [['login', 'is', perforce_user]])
-            
-            self._sg_user_lookup[perforce_user] = sg_res
+            # user not in lookup so ask framework:
+            p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
+            sg_user = p4_fw.get_shotgun_user(perforce_user)
+            self._sg_user_lookup[perforce_user] = sg_user
 
         return self._sg_user_lookup[perforce_user] 
         
@@ -206,11 +203,20 @@ class ShotgunSync(object):
         """
         Use hook to construct context for the path
         """
-        # (TODO) - possibly move to hook unless moving to metadata file is more robust?
+        # (TODO) - the context should ideally be preserved through the metadata file when published.
+        # However, still need to handle the case where the file may have been submitted directly through
+        # Perforce so will probably still want to have hook for this...
+        #
+        # We could do something intelligent like using the previous context information if this
+        # path has been published before? - would this be in the hook or before that? - Probably try
+        # to construct the best possible context and then allow a hook to create a new context if it needs
+        # to? 
+        
         context =self._app..sgtk.context_from_path(local_path)
                 
         # if we don't have a task but do have a step then try to determine the task from the step:
-        # (TODO) - include full context in metadata file
+        # (TODO) - this logic should be moved to a hook as it  won't work if there are Multiple tasks on 
+        # the same entity that use the same Step!
         if not context.task:
             if context.entity and context.step:
                 sg_res = self._app.shotgun.find("Task", [["step", "is", context.step], ["entity", "is", context.entity]])
