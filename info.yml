@@ -1,0 +1,40 @@
+# Copyright (c) 2013 Shotgun Software Inc.
+# 
+# CONFIDENTIAL AND PROPRIETARY
+# 
+# This work is provided "AS IS" and subject to the Shotgun Pipeline Toolkit 
+# Source Code License included in this distribution package. See LICENSE.
+# By accessing, using, copying or modifying this work you indicate your 
+# agreement to the Shotgun Pipeline Toolkit Source Code License. All rights 
+# not expressly granted therein are reserved by Shotgun Software Inc.
+
+# Metadata defining the behaviour and requirements for this app
+
+# expected fields in the configuration file for this app
+configuration:
+    
+    poll_interval:
+        type: int
+        description: "Interval in secnods that the daemon will poll for new changes"
+        default_value: 5
+            
+# the Shotgun fields that this app needs in order to operate correctly
+requires_shotgun_fields:
+
+# More verbose description of this item 
+display_name: "Perforce Shotgun Sync"
+description: "This app contains the sync command used to sync a Perforce change
+              into Shotgun"
+              
+# Required minimum versions for this item to run
+requires_shotgun_version:
+requires_core_version: "v0.14.12"
+requires_engine_version: 
+
+# the engines that this app can operate in:
+supported_engines: ["tk-shell"]
+
+# the frameworks required to run this app
+frameworks:
+    - {"name": "tk-framework-perforce", "version": "v0.0.2"}
+    
