@@ -13,6 +13,7 @@
 
 import os
 import sys
+from pprint import pprint
 
 import sgtk
 from P4 import P4Exception
@@ -86,6 +87,7 @@ class ShotgunSync(object):
             # ]
             change_desc = p4_res[0]
             change_id = change_desc["change"]
+            workspace = change_desc.get("client")
             
             # get shotgun user:
             sg_user = self._get_sg_user(self._app.sgtk, change_desc["user"])
@@ -95,7 +97,7 @@ class ShotgunSync(object):
             file_revs = zip(change_desc.get("depotFile", []), change_desc.get("rev", []))
             for depot_path, rev in file_revs:
                 # process file revision
-                file_details = self._process_file_revision(depot_path, rev, sg_user, change_id, change_desc.get("desc", ""), p4)
+                file_details = self._process_file_revision(depot_path, rev, sg_user, workspace, change_id, change_desc.get("desc", ""), p4)
             
                 if file_details:
                     published_files.append(file_details)            
@@ -111,9 +113,8 @@ class ShotgunSync(object):
             
         except Exception, e:
             self._app.log_error(e)
-            self._app.log_exception("AARGH")    
 
-    def _process_file_revision(self, depot_path, file_revision, sg_user, change_id, description, p4):
+    def _process_file_revision(self, depot_path, file_revision, sg_user, workspace, change_id, description, p4):
         """
         Process a single revision of a perforce file.  If the file can be mapped to the
         current context's project then create a published file for it and return the
@@ -141,22 +142,34 @@ class ShotgunSync(object):
         
         # it is so lets Register a new Published File for it
         #
-                        
-        # build a context for the depot path:
-        # (AD) - this is obviously very fragile so need a way to do this using depot paths
-        # - maybe be able to set the project root and then set it to depot_project_root?
+
         local_path = tk.pipeline_configuration.get_primary_data_root() + depot_path[len(depot_project_root):]
-        context = self._get_context_for_path(tk, local_path)    
+         
+        # load any publish data we have stored for this file:
+        p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
+        publish_data = p4_fw.load_publish_data(depot_path, sg_user, workspace)
+        
+        context = publish_data.get("context")
+        if not context:
+            # try to build a context from the depot path:
+            # (AD) - this is obviously very fragile so need a way to do this using depot paths
+            # - maybe be able to set the project root and then set it to depot_project_root?
+            context = self._get_context_for_path(tk, local_path)
+            
+        # update optional args:
+        if "comment" not in publish_data:
+            publish_data["comment"] = description
+        publish_data["created_by"] = sg_user
         
         # Register publish for the file:
+        publish_data["tk"] = self._app.sgtk
+        publish_data["context"] = context
+        publish_data["path"] = depot_path
+        publish_data["name"] = os.path.basename(local_path)
+        publish_data["version_number"] = int(file_revision)
+        
         self._app.log_debug("Registering new published file: %s:%s" % (depot_path, file_revision))
-        sg_res = sgtk.util.register_publish(self._app.sgtk,
-                                            context, 
-                                            depot_path, 
-                                            os.path.basename(local_path), 
-                                            int(file_revision), 
-                                            comment = description, 
-                                            created_by = sg_user)
+        sg_res = sgtk.util.register_publish(**publish_data)
         
         file_data = {"depot":depot_path, "local":local_path, "context":context, "sg_file":sg_res}
         
@@ -176,7 +189,7 @@ class ShotgunSync(object):
             
         else:
             # create new change:
-            self._app.log_debug("Creating new Change (Revision) entity for change: %s" % data["code"])
+            self._app.log_debug("Creating new Change (Revision) entity for change: %s" % change)
             self._app.shotgun.create("Revision", change)
 
     def _connect_to_perforce(self):
