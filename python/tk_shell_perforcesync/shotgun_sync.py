@@ -15,8 +15,10 @@ import os
 import sys
 from pprint import pprint
 
-import sgtk
 from P4 import P4Exception
+
+import sgtk
+from sgtk import TankError
 
 class ShotgunSync(object):
     """
@@ -97,19 +99,43 @@ class ShotgunSync(object):
             file_revs = zip(change_desc.get("depotFile", []), change_desc.get("rev", []))
             for depot_path, rev in file_revs:
                 # process file revision
-                file_details = self._process_file_revision(depot_path, rev, sg_user, workspace, change_id, change_desc.get("desc", ""), p4)
+                file_details = self._process_file_revision(depot_path, int(rev), sg_user, workspace, change_id, change_desc.get("desc", ""), p4)
             
                 if file_details:
                     published_files.append(file_details)            
             
-            # and create entity for change:
-            change = {}
-            change["code"] = change_id
-            change["description"] = change_desc.get("desc", "")
-            change["project"] = self._app.context.project
-            change["created_by"] = sg_user
-            change["sg_published_files"] = [{"type":"PublishedFile", "id":file["sg_file"]["id"]} for file in published_files]
-            self._create_or_update_change(change)
+            if published_files:
+                # create entity for change:
+                change = {}
+                change["code"] = change_id
+                change["description"] = change_desc.get("desc", "")
+                change["project"] = self._app.context.project
+                change["created_by"] = sg_user
+                change["sg_workspace"] = workspace
+
+                published_file_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
+                
+                # (TEMP) - whilst installing for testing, I messed up when creating the sg_published_files field on the Revision
+                # entity, creating it with the wrong type!
+                # Until this is fixed, we need to check here to see if sg_publishedfiles should be used instead!
+                if not hasattr(self, "__published_file_field"):
+                    pf_field = None
+                    for field in ["sg_published_files", "sg_publishedfiles"]:
+                        try:
+                            schema = tk.shotgun.schema_field_read("Revision")[field]
+                            if (schema.get("data_type", {}).get("value") == "multi_entity"
+                                and published_file_entity_type in schema.get("properties", {}).get("valid_types", {}).get("value", [])):
+                                # ok to use this field!
+                                pf_field = field
+                                break
+                        except:
+                            pass
+                    # default to the 'correct' field anyway!
+                    self.__published_file_field = pf_field or "sg_published_files"                
+                
+                change[self.__published_file_field] = [{"type":published_file_entity_type, "id":file["sg_file"]["id"]} for file in published_files]
+                
+                self._create_or_update_change(change)
             
         except Exception, e:
             self._app.log_error(e)
@@ -122,13 +148,23 @@ class ShotgunSync(object):
         """
         # Determine the depot project root for this depot file:
         depot_project_root = self._get_depot_project_root(depot_path, p4)
+        if not depot_project_root:
+            # didn't find a project root so this file is probably not
+            # within the asset directory!
+            return None
         
         # find the pipeline config root from the depot root:
         local_pc_root = self._get_local_pc_root(depot_project_root, p4)
+        if not local_pc_root:
+            # this shouldn't happen and probably means there is a !
+            self._app.log_error("Failed to locate pipeline configuration for depot project root '%s'" 
+                                % depot_project_root)
+            return None
         
         # get a tk instance for this pc root:
         tk = self._pc_tk_instances.get(local_pc_root)
         if not tk:
+            # create a new api instance:
             tk = sgtk.sgtk_from_path(local_pc_root)
             self._pc_tk_instances[local_pc_root] = tk
         
@@ -142,12 +178,15 @@ class ShotgunSync(object):
         
         # it is so lets Register a new Published File for it
         #
-
         local_path = tk.pipeline_configuration.get_primary_data_root() + depot_path[len(depot_project_root):]
          
         # load any publish data we have stored for this file:
-        p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
-        publish_data = p4_fw.load_publish_data(depot_path, sg_user, workspace)
+        publish_data = {}
+        try:
+            p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
+            publish_data = p4_fw.load_publish_data(depot_path, sg_user, workspace, file_revision)
+        except Exception, e:
+            self._app.log_error("Failed to load publish data for %s: %s" % (depot_path, e))
         
         context = publish_data.get("context")
         if not context:
@@ -156,23 +195,30 @@ class ShotgunSync(object):
             # - maybe be able to set the project root and then set it to depot_project_root?
             context = self._get_context_for_path(tk, local_path)
             
-        # update optional args:
+        if not context:
+            self._app.log_error("Failed to determine context to use for %s - unable to register publish!" % depot_path)
+            return None
+            
+        # update optional args and register publish:
         if "comment" not in publish_data:
+            # just use the change description instead:
             publish_data["comment"] = description
         publish_data["created_by"] = sg_user
-        
-        # Register publish for the file:
         publish_data["tk"] = self._app.sgtk
         publish_data["context"] = context
         publish_data["path"] = depot_path
         publish_data["name"] = os.path.basename(local_path)
-        publish_data["version_number"] = int(file_revision)
+        publish_data["version_number"] = file_revision
         
-        self._app.log_debug("Registering new published file: %s:%s" % (depot_path, file_revision))
-        sg_res = sgtk.util.register_publish(**publish_data)
-        
-        file_data = {"depot":depot_path, "local":local_path, "context":context, "sg_file":sg_res}
-        
+        self._app.log_debug("Registering new published file: %s:%d" % (depot_path, file_revision))
+        file_data = {}
+        try:
+            sg_res = sgtk.util.register_publish(**publish_data)
+            file_data = {"depot":depot_path, "local":local_path, "context":context, "sg_file":sg_res}
+        except Exception, e:
+            self._app.log_error("Failed to register publish for '%s': %s" % (depot_path, e))
+            return None
+                
         return file_data
 
     def _create_or_update_change(self, change):
@@ -185,6 +231,8 @@ class ShotgunSync(object):
         if sg_res:
             # update existing change:
             self._app.log_debug("Updating existing Change (Revision) entity: %d" % sg_res["id"])
+            
+            # (TODO)
             # ...
             
         else:
@@ -220,9 +268,9 @@ class ShotgunSync(object):
         """
         Use hook to construct context for the path
         """
-        # (TODO) - the context should ideally be preserved through the metadata file when published.
-        # However, still need to handle the case where the file may have been submitted directly through
-        # Perforce so will probably still want to have hook for this...
+        # Although the context should ideally be preserved through the publish data when published, we
+        # still need to handle the case where the file may have been submitted directly through Perforce 
+        # so will probably still want to have hook for this...
         #
         # We could do something intelligent like using the previous context information if this
         # path has been published before? - would this be in the hook or before that? - Probably try
@@ -292,6 +340,8 @@ class ShotgunSync(object):
             p4.run_files(tank_configs_path)
         except P4Exception:
             # bad - file not found!
+            self._app.log_error("Configuration file '%s' does not exist in the Perforce depot: " 
+                           % (p4.errors[0] if p4.errors else e))
             return None
 
         # read the pc root path from the config file:
@@ -307,10 +357,12 @@ class ShotgunSync(object):
             config = yaml.load(contents)
             
             local_pc_root = config[0][sys.platform]
-            
+
+        except P4Exception, e:
+            self._app.log_error("Failed to determine project root: %s" % (p4.errors[0] if p4.errors else e))
+            return None
         except Exception, e:
             self._app.log_error("Failed to determine project root: %s" % e)
-            # any exception is bad!
             return None
         
         # cache in case we need it again:
