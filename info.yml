@@ -15,7 +15,7 @@ configuration:
     
     poll_interval:
         type: int
-        description: "Interval in secnods that the daemon will poll for new changes"
+        description: "Interval in seconds that the daemon will poll for new changes"
         default_value: 5
             
 # the Shotgun fields that this app needs in order to operate correctly
