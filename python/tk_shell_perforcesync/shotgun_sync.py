@@ -15,10 +15,11 @@ import os
 import sys
 from pprint import pprint
 
-from P4 import P4Exception
-
 import sgtk
 from sgtk import TankError
+
+p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
+from P4 import P4Exception
 
 class ShotgunSync(object):
     """
@@ -183,7 +184,6 @@ class ShotgunSync(object):
         # load any publish data we have stored for this file:
         publish_data = {}
         try:
-            p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
             publish_data = p4_fw.load_publish_data(depot_path, sg_user, workspace, file_revision)
         except Exception, e:
             self._app.log_error("Failed to load publish data for %s: %s" % (depot_path, e))
@@ -245,7 +245,6 @@ class ShotgunSync(object):
         Connect to Perforce
         """
         try:
-            p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
             p4 = p4_fw.connect(False)
             return p4
         except:
@@ -258,7 +257,6 @@ class ShotgunSync(object):
         """
         if perforce_user not in self._sg_user_lookup:
             # user not in lookup so ask framework:
-            p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
             sg_user = p4_fw.get_shotgun_user(perforce_user)
             self._sg_user_lookup[perforce_user] = sg_user
 

@@ -13,6 +13,8 @@
 
 import time
 import sgtk
+
+p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
 from P4 import P4Exception
 
 from .shotgun_sync import ShotgunSync
@@ -65,7 +67,6 @@ class ShotgunSyncDaemon(object):
         """
         """
         try:
-            p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
             p4 = p4_fw.connect(False)
             return p4
         except:
