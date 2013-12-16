@@ -181,6 +181,16 @@ class ShotgunSync(object):
         #
         local_path = tk.pipeline_configuration.get_primary_data_root() + depot_path[len(depot_project_root):]
          
+        # make sure it actually matches a template to avoid publishing files we don't care about:
+        template = None
+        try:
+            template = tk.template_from_path(local_path)
+        except:
+            pass
+        if not template:
+            self._app.log_debug("File '%s' is not recognized by toolkit, skipping" % depot_path)
+            return None
+         
         # load any publish data we have stored for this file:
         publish_data = {}
         try:
@@ -197,6 +207,10 @@ class ShotgunSync(object):
             
         if not context:
             self._app.log_error("Failed to determine context to use for %s - unable to register publish!" % depot_path)
+            return None
+        
+        if not context.project:
+            self._app.log_error("Failed to determine project to use for %s - unable to register publish!" % depot_path)
             return None
             
         # update optional args and register publish:
