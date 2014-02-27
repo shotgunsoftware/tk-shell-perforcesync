@@ -12,7 +12,9 @@
 """
 
 import time
+
 import sgtk
+from sgtk import TankError
 
 p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
 from P4 import P4Exception
@@ -21,99 +23,173 @@ from .shotgun_sync import ShotgunSync
 
 class ShotgunSyncDaemon(object):
     """
+    Class to encapsulate the daemon behaviour to sync Perforce changes with Shotgun by 
+    iterating through new changes as they are submitted. 
     """
     P4_COUNTER_BASE_NAME = "tk_perforcesync_project_"
     
-    def __init__(self, app):
+    def __init__(self, app, start_change=None, p4_user=None, p4_pass=None):
         """
+        Construction
         """
-        self._app = app
-        self._interval = self._app.get_setting("poll_interval")
-        self._p4_counter_name = "%s%d" % (ShotgunSyncDaemon.P4_COUNTER_BASE_NAME, self._app.context.project["id"])
+        self.__app = app
+        self.__start_change = start_change
+        self.__p4_user = p4_user
+        self.__p4_pass = p4_pass
         
-        self._p4_sync = ShotgunSync(self._app)
+        self._interval = self.__app.get_setting("poll_interval")
+        
+        self._p4_counter_name = "%s%d" % (ShotgunSyncDaemon.P4_COUNTER_BASE_NAME, self.__app.context.project["id"])
+        self._p4_sync = ShotgunSync(self.__app, self.__p4_user, self.__p4_pass)
         
     def run(self):
         """
-        Run continuous daemon!
+        Run continuous daemon
         """
+        start_change = self.__start_change
+        p4 = None
         while True:
-            
-            self._app.log_info("Checking for new Perforce changes to sync with Shotgun...")
-            
-            # open connection to perforce:
-            p4 = self._connect_to_perforce()
-            if p4:            
-                try:
-                    # look to see if there are new changes to process:
-                    change_range = self._get_new_changes(p4)
-                    
-                    if change_range:
-                        # process change range:
-                        self._process_changes(change_range[0], change_range[1], p4)
-                        
-                        # update counter:
-                        self._update_perforce_counter(change_range[1], p4)
-                finally:
-                    p4.disconnect()
-            else:
-                self._app.log_error("Failed to open connection to Perforce server!")                    
-                        
-            # and sleep for a bit:
-            self._app.log_debug("Sleeping for %d seconds" % self._interval)
-            time.sleep(self._interval)
-    
-    def _connect_to_perforce(self):
-        """
-        """
-        try:
-            p4 = p4_fw.connect(False)
-            return p4
-        except:
-            self._app.log_exception("Failed to connect!")
-            return None    
-    
-    def _get_new_changes(self, p4):
-        """
-        """
-        try:
-            # query start change from perforce counter:
-            p4_res = p4.run_counter(self._p4_counter_name)
-            # [{'counter': 'tk_shotgun_sync', 'value': '0'}]
-            start_change = int(p4_res[0]["value"])+1 if p4_res else 0
-            
-            # get highest submitted change from perforce:
-            p4_res = p4.run_changes("-m", "1", "-s", "submitted")
-            # [{'status': 'submitted', 'changeType': 'public', 'change': '36', ...}]
-            end_change =  int(p4_res[0]["change"])
-            
-            if end_change >= start_change:
-                return (start_change, end_change)
-            
-        except P4Exception, e:
-            self._app.log_error("Failed to determine changelist range: %s" % p4.errors[0] if p4.errors else e)
-        except Exception, e:
-            self._app.log_error("Failed to determine changelist range: %s" % e)        
-    
-    def _process_changes(self, start_change, end_change, p4):
-        """
-        """
-        # sync changes:
-        for change_id in range(start_change, end_change + 1):
+            self.__app.log_info("Checking for new Perforce changes to sync with Shotgun...")
+
+            #p4 = None
             try:
-                self._p4_sync.sync_change(change_id, p4)
-                #self._sync_change(change_id, p4)
-            except Exception, e:
-                self._app.log_error("Failed to sync change %d: %s" % (change_id, e))
+                if not p4 or not p4.connected():                    
+                    # re-connect
+                    # (AD) - test/handle what happens if login times out - should this try to 
+                    # reconnect each time just in case?
+                    p4 = p4_fw.connect(False, self.__p4_user, self.__p4_pass)
+            except TankError, e:
+                self.__app.log_error("Failed to connect to Perforce server: %s" % e)
+            else:
+                res = self.__process_next_change(p4, start_change)
+                if isinstance(res, int):
+                    # processed a change so move to the next one:
+                    start_change = res+1
+                    continue
+            #finally:
+            #    p4.disconnect()
+
+            # didn't do anything so sleep for a bit:
+            self.__app.log_debug("No new changes found - sleeping for %d seconds" % self._interval)
+            time.sleep(self._interval)
+
+    def __process_next_change(self, p4, start_change=0):
+        """
+        Attempt to register a new 'Revision' entity in Shotgun for the next 
+        submitted Perforce change that needs to be processed.
+
+        Because neither Perforce nor Shotgun allow this to happen in an atomic way, we
+        use both to ensure that a change is only processed by a single daemon.
+        
+        :param p4:              The Perforce connection object to use
+        :param start_change:    Start looking for the next submitted change from this is or the value of
+                                the Perforce counter, whichever is highest.
+        """
+        # get the current counter value
+        p4_counter = self.__retrieve_counter(p4)
+        
+        # Get the next submitted change starting from either the counter+1 or the start
+        # change, whichever is highest.        
+        p4_change = self.__find_next_submitted_change(p4, max(start_change, p4_counter+1))
+        if not p4_change:
+            return
+        
+        # validate that this change is in fact in this project:
+        if not self._p4_sync.is_change_in_context(p4, p4_change):
+            return
+        
+        change_id = int(p4_change["change"])
+        
+        # next, create this change in Shotgun in an atomic way:
+        sg_change_entity = self._p4_sync.create_sg_entity_for_change(p4_change)
+        if sg_change_entity:
+            # As we were successful, update Perforce to tell it we 
+            # have processed this change.  This only happens if this process
+            # has correctly created a new Revision entity for this change in
+            # Shotgun.
+            self.__update_counter(p4, change_id)
+        
+            # finally, process the change contents:
+            self._p4_sync.sync_change_contents(p4, p4_change, sg_change_entity)
+        
+        return change_id
     
-    def _update_perforce_counter(self, change, p4):
+    def __find_next_submitted_change(self, p4, start_change):
         """
+        Find the next submitted change from Perforce with a change id >= start_change.
+        
+        :param p4:              The Perforce connection to use
+        :param start_change:    Minimum change to look for new changes from
         """
-        # update counter:                               
-        try:           
-            p4.run_counter(self._p4_counter_name, str(change))
+        self.__app.log_debug("Looking for the next change submitted to Perforce...")        
+        try:
+            # get highest submitted change from perforce:
+            # returns: [{'status': 'submitted', 'changeType': 'public', 'change': '36', ...}]            
+            p4_res = p4.run_changes("-m", "1", "-s", "submitted")
+            if not p4_res:
+                # nothing submitted!
+                return
+            end_change =  int(p4_res[0]["change"])
+            if end_change < start_change:
+                # nothing new submitted!
+                return
+            
+            # Find the next submitted change, skipping any pending or shelved changes:
+            # Perforce always increments the submitted change id even if there are previous
+            # shelved or pending changes so it's safe to assume that they are sequentially 
+            # ordered
+            #
+            # (TODO) - is there an easier way to determine this?
+            block_size = 10
+            for block_start in range(start_change, end_change+1, block_size):
+                block_end = min(block_start + block_size - 1, end_change)
+                
+                p4_res = p4.run_describe(range(block_start, block_end + 1))
+                changes_by_change = dict([(r["change"], r) for r in p4_res if "change" in r])
+                
+                for change_num in range(block_start, block_end + 1):
+                    change = changes_by_change.get(str(change_num))
+                    if not change or change.get("status") != "submitted":
+                        continue
+                
+                    # this is the next submitted change
+                    return change
+            
         except P4Exception, e:
-            self._app.log_error("Failed to update Perforce counter '%s' - %s" 
+            self.__app.log_error("Failed to find next change to process: %s" % p4.errors[0] if p4.errors else e)
+        except Exception, e:
+            self.__app.log_error("Failed to find next change to process: %s" % e)          
+    
+    def __retrieve_counter(self, p4):
+        """
+        Retrieve the perforce counter for this project
+        
+        :param p4:    The Perforce connection to use
+        """
+        try:
+            p4_res = p4.run_counter(self._p4_counter_name)
+            return int(p4_res[0]["value"]) if p4_res else 0            
+        except P4Exception, e:
+            self.__app.log_error("Failed to retrieve Perforce counter '%s' - %s" 
                            % (self._p4_counter_name, (p4.errors[0] if p4.errors else e)))
         except Exception, e:
-            self._app.log_error("Failed to update Perforce counter '%s' - %s" % (self._p4_counter_name, e))
+            self.__app.log_error("Failed to retrieve Perforce counter '%s' - %s" % (self._p4_counter_name, e))                    
+    
+    def __update_counter(self, p4, change_id):
+        """
+        Update the perforce counter to the specified change id.
+        
+        :param p4:         The perforce connection to use
+        :param change_id:  The change id to update the counter to
+        """ 
+        self.__app.log_debug("Updating the Perforce counter '%s' to %s" % (self._p4_counter_name, change_id))                        
+        try:
+            p4.run_counter(self._p4_counter_name, str(change_id))
+        except P4Exception, e:
+            self.__app.log_error("Failed to update Perforce counter '%s' - %s" 
+                           % (self._p4_counter_name, (p4.errors[0] if p4.errors else e)))
+        except Exception, e:
+            self.__app.log_error("Failed to update Perforce counter '%s' - %s" % (self._p4_counter_name, e))
+            
+            
+            
