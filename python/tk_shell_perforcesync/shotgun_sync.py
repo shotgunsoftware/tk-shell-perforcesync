@@ -238,7 +238,7 @@ class ShotgunSync(object):
         # get details for all files in change excluding any deletes, move/deletes, etc.:
         p4_res = []
         try:
-            p4_res = p4.run_fstat("-T", "depotFile, headRev", 
+            p4_res = p4.run_fstat("-T", "depotFile, headRev, headModTime", 
                                   "-F", "^headAction=delete ^headAction=move/delete ^headAction=purge ^headAction=archive",                                  
                                   "-e", change_id, 
                                   "//...")
@@ -247,24 +247,39 @@ class ShotgunSync(object):
                                 % (change_id, p4.errors[0] if p4.errors else e))
             return
 
-        file_revs = set()
-        for item in p4_res:
-            depot_file = item.get("depotFile")
-            head_rev = item.get("headRev")
+        p4_file_details = {}
+        for p4_file in p4_res:
+            depot_file = p4_file.get("depotFile")
+            head_rev = p4_file.get("headRev")
             if not depot_file or not head_rev:
                 continue
             
-            file_revs.add((depot_file, head_rev))
+            p4_file_details[(depot_file, head_rev)] = p4_file
         
         # process all remaining file revisions for the change:
+        change_client = p4_change.get("client", "")
+        change_desc = p4_change.get("desc", "")
+        change_time = datetime.fromtimestamp(int(p4_change["time"]))
+        
         published_files = []
-        for depot_path, rev in file_revs:
+        for (depot_path, rev), p4_file in p4_file_details.iteritems():
+            
+            publish_time = change_time
+            head_mod_time = p4_file.get("headModTime")
+            if head_mod_time:
+                publish_time = datetime.fromtimestamp(int(head_mod_time))
             
             # process file revision
             # (AD) - this probably wants to be split into two passes so that we can
             # handle dependencies where the dependent file is part of the same change.
             # ...            
-            published_file = self.__process_file_revision(depot_path, int(rev), sg_user, p4_change, p4)
+            published_file = self.__process_file_revision(depot_path, 
+                                                          int(rev), 
+                                                          sg_user, 
+                                                          change_client, 
+                                                          change_desc, 
+                                                          publish_time, 
+                                                          p4)
 
             if published_file:
                 published_files.append(published_file)          
@@ -346,7 +361,7 @@ class ShotgunSync(object):
         
         return res
 
-    def __process_file_revision(self, depot_path, file_revision, sg_user, p4_change, p4):
+    def __process_file_revision(self, depot_path, file_revision, sg_user, change_client, change_desc, publish_time, p4):
         """
         Process a single revision of a perforce file.  If the file can be mapped to the
         current context's project then create a published file for it and return the
@@ -415,7 +430,7 @@ class ShotgunSync(object):
             # load any publish data we have stored for this file:
             publish_data = {}
             try:
-                publish_data = p4_fw.load_publish_data(depot_path, sg_user, p4_change.get("client", ""), file_revision)
+                publish_data = p4_fw.load_publish_data(depot_path, sg_user, change_client, file_revision)
             except TankError, e:
                 self._app.log_error("Failed to load publish data for %s#%d: %s" % (depot_path, file_revision, e))
             except Exception, e:
@@ -438,10 +453,10 @@ class ShotgunSync(object):
                 return None
                 
             # update optional args and register publish:
-            publish_data["comment"] = p4_change.get("desc", "") # Always use change list description for the comment!
+            publish_data["comment"] = change_desc # Always use change list description for the comment!
             publish_data["created_by"] = sg_user
             # (TODO) - should this be the file revisions headModTime?
-            publish_data["created_at"] = datetime.fromtimestamp(int(p4_change["time"]))            
+            publish_data["created_at"] = publish_time            
             publish_data["tk"] = self._app.sgtk
             publish_data["context"] = context
             publish_data["path"] = file_url
