@@ -13,12 +13,15 @@
 
 import os
 import sys
+import urllib
+from datetime import datetime
 from pprint import pprint
 
 import sgtk
 from sgtk import TankError
 
 p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
+p4_util = p4_fw.import_module("util")
 from P4 import P4Exception
 
 class ShotgunSync(object):
@@ -159,8 +162,9 @@ class ShotgunSync(object):
             return
 
         change_id = str(p4_change["change"])
+        created_at = datetime.fromtimestamp(int(p4_change["time"]))
         
-        self._app.log_debug("Creating Shotgun Revision entity for Perforce change %s" % change_id)        
+        self._app.log_info("Creating Shotgun Revision entity for Perforce change %s" % change_id)        
         
         # check to see if this change exists in Shotgun:
         try:
@@ -184,6 +188,7 @@ class ShotgunSync(object):
             change_data["description"] = p4_change.get("desc", "")
             change_data["project"] = self._app.context.project
             change_data["created_by"] = sg_user
+            change_data["created_at"] = created_at 
             change_data["sg_workspace"] = p4_change.get("client")
             
             sg_change = self._app.shotgun.create("Revision", change_data)
@@ -228,18 +233,41 @@ class ShotgunSync(object):
         """
         
         sg_user = self.__get_sg_user(self._app.sgtk, p4_change["user"])
-        workspace = p4_change.get("client")
         change_id = str(p4_change["change"])
         
-        # process all file revisions in change:
-        published_files = []
-        file_revs = zip(p4_change.get("depotFile", []), p4_change.get("rev", []))
-        for depot_path, rev in file_revs:
-            # process file revision
-            file_details = self.__process_file_revision(depot_path, int(rev), sg_user, workspace, change_id, p4_change.get("desc", ""), p4)
+        # get details for all files in change excluding any deletes, move/deletes, etc.:
+        p4_res = []
+        try:
+            p4_res = p4.run_fstat("-T", "depotFile, headRev", 
+                                  "-F", "^headAction=delete ^headAction=move/delete ^headAction=purge ^headAction=archive",                                  
+                                  "-e", change_id, 
+                                  "//...")
+        except P4Exception, e:
+            self._app.log_error("Failed to query file revisions for change %s: %s" 
+                                % (change_id, p4.errors[0] if p4.errors else e))
+            return
+
+        file_revs = set()
+        for item in p4_res:
+            depot_file = item.get("depotFile")
+            head_rev = item.get("headRev")
+            if not depot_file or not head_rev:
+                continue
+            
+            file_revs.add((depot_file, head_rev))
         
-            if file_details:
-                published_files.append(file_details)            
+        # process all remaining file revisions for the change:
+        published_files = []
+        for depot_path, rev in file_revs:
+            
+            # process file revision
+            # (AD) - this probably wants to be split into two passes so that we can
+            # handle dependencies where the dependent file is part of the same change.
+            # ...            
+            published_file = self.__process_file_revision(depot_path, int(rev), sg_user, p4_change, p4)
+
+            if published_file:
+                published_files.append(published_file)          
         
         if not published_files:
             # nothing else to do
@@ -268,7 +296,7 @@ class ShotgunSync(object):
         # build the update data for the change:
         change_data = {self.__published_file_field:[]}
         for pf in published_files:
-            change_data[self.__published_file_field].append({"type":published_file_entity_type, "id":pf["sg_file"]["id"]})
+            change_data[self.__published_file_field].append({"type":published_file_entity_type, "id":pf["id"]})
             
         # update the change:
         self._app.log_debug("Updating Published files for change (Revision) entity %s..." % (sg_change_entity["code"]))
@@ -284,6 +312,7 @@ class ShotgunSync(object):
         
         :param depot_path:    Depot path to check
         :param p4:            Perforce connection to use
+        :returns:             Tuple containing (depot project root, sgtk instance)
         """
         # first, check the cache to see if we found this information previously:
         if depot_path in self.__depot_path_details_cache:
@@ -317,7 +346,7 @@ class ShotgunSync(object):
         
         return res
 
-    def __process_file_revision(self, depot_path, file_revision, sg_user, workspace, change_id, description, p4):
+    def __process_file_revision(self, depot_path, file_revision, sg_user, p4_change, p4):
         """
         Process a single revision of a perforce file.  If the file can be mapped to the
         current context's project then create a published file for it and return the
@@ -339,25 +368,31 @@ class ShotgunSync(object):
         # isn't one already
         #
         
-        # (AD) - this is faking a local path so that template_from_path will work correctly
-        # which although it looks a bit hokey should work I think...
-        # It's using the primary data root as well - this setup won't work for
-        # a multi-root setup atm.
-        local_path = tk.pipeline_configuration.get_primary_data_root() + depot_path[len(depot_project_root):]
-        
-        # make sure the file actually matches a template to avoid publishing files we don't care about:
+        # check all data roots to see if this is a recognized toolkit file.  If no valid template
+        # can be found then assume that the file is outside all data roots.
         template = None
-        try:
-            template = tk.template_from_path(local_path)
-        except:
-            # (TODO) might want to handle certain errors here, e.g. matching multiple templates?
-            pass
+        proxy_local_path = None
+        depot_root_relative_path = depot_path[len(depot_project_root):].lstrip("\\/")
+        # make sure we use the unquoted version of the depot path:
+        depot_root_relative_path = urllib.unquote(depot_root_relative_path)
+        for data_root in tk.roots.values():
+            proxy_local_path = os.path.join(data_root, depot_root_relative_path)
+            try:
+                template = tk.template_from_path(proxy_local_path)
+                if template:
+                    break
+            except:
+                # (TODO) might want to handle certain errors here, e.g. matching multiple templates?
+                pass
         if not template:
             self._app.log_debug("File '%s' is not recognized by toolkit, skipping" % depot_path)
-            return None
+            return None        
         
         # we'll use the file name for the publish name:
-        publish_name = os.path.basename(local_path)
+        publish_name = os.path.basename(proxy_local_path)
+        
+        # construct full url for the published file:
+        file_url = p4_util.url_from_depot_path(p4, depot_path, file_revision)        
         
         # find existing publish entity if there is one:
         pf_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
@@ -367,15 +402,12 @@ class ShotgunSync(object):
         sg_res = self._app.shotgun.find(pf_entity_type, filters, ["code", "id", "path", "version"])
         sg_published_file = None
         for item in sg_res:
-            
-            # (AD) - this doesn't work atm because it's comparing against the local path!
-            # (TODO) - fix/make more robust!
-            if item.get("path", {}).get("local_path") == local_path:
+            if item.get("path", {}).get("url") == file_url:
+                # publish has already been registered for this file
                 sg_published_file = item
                 break
-            
         if sg_published_file:
-            self.log_debug("Published file already exists for %s#%d" % (depot_path, file_revision))
+            self._app.log_debug("Published file already exists for %s#%d" % (depot_path, file_revision))
             
         else:
             # need to register a new published file:
@@ -383,17 +415,19 @@ class ShotgunSync(object):
             # load any publish data we have stored for this file:
             publish_data = {}
             try:
-                publish_data = p4_fw.load_publish_data(depot_path, sg_user, workspace, file_revision)
+                publish_data = p4_fw.load_publish_data(depot_path, sg_user, p4_change.get("client", ""), file_revision)
+            except TankError, e:
+                self._app.log_error("Failed to load publish data for %s#%d: %s" % (depot_path, file_revision, e))
             except Exception, e:
-                self._app.log_error("Failed to load publish data for %s: %s" % (depot_path, e))
-                #self._app.log_exception("Failed to load publish data for %s" % (depot_path))
+                self._app.log_exception("Failed to load publish data for %s#%d" % (depot_path, file_revision))
             
             context = publish_data.get("context")
             if not context:
                 # try to build a context from the depot path:
                 # (AD) - this is obviously very fragile so need a way to do this using depot paths
                 # - maybe be able to set the project root and then set it to depot_project_root?
-                context = self.__get_context_for_path(tk, local_path)
+                # - this would also allow template_from_path to work on depot paths...
+                context = self.__get_context_for_path(tk, proxy_local_path)
                 
             if not context:
                 self._app.log_error("Failed to determine context to use for %s - unable to register publish!" % depot_path)
@@ -404,25 +438,32 @@ class ShotgunSync(object):
                 return None
                 
             # update optional args and register publish:
-            if "comment" not in publish_data:
-                # just use the change description instead:
-                publish_data["comment"] = description
+            publish_data["comment"] = p4_change.get("desc", "") # Always use change list description for the comment!
             publish_data["created_by"] = sg_user
+            # (TODO) - should this be the file revisions headModTime?
+            publish_data["created_at"] = datetime.fromtimestamp(int(p4_change["time"]))            
             publish_data["tk"] = self._app.sgtk
             publish_data["context"] = context
-            publish_data["path"] = depot_path
+            publish_data["path"] = file_url
             publish_data["name"] = publish_name
             publish_data["version_number"] = file_revision
             
-            self._app.log_debug("Registering new published file: %s#%d" % (depot_path, file_revision))
+            self._app.log_info("Registering new published file: %s#%d" % (depot_path, file_revision))
             file_data = {}
             try:
+                # (AD) Some notes about using register_publish with this data:
+                #
+                # - abstract fields won't get translated - if we do need this then we'll have to figure
+                #   out how to handle it for this use case - non-trivial!
+                # - dependencies_paths won't get resolved correctly so dependency_ids should be used 
+                #   instead.  This also ensure the correct version is linked
                 sg_published_file = sgtk.util.register_publish(**publish_data)
             except Exception, e:
                 self._app.log_error("Failed to register publish for '%s': %s" % (depot_path, e))
                 return None
 
         # now, check to see if we have version data:
+        # (TODO) - not finished yet!
         version_entity = sg_published_file.get("version")
         if version_entity:
             # ?
@@ -431,9 +472,8 @@ class ShotgunSync(object):
             # may need to create version:
             pass
 
-        file_data = {"depot":depot_path, "local":local_path, "context":context, "sg_file":sg_published_file}
-                
-        return file_data
+        # return the published file entity:
+        return {"type":sg_published_file["type"], "id":sg_published_file["id"]}
 
     def __connect_to_perforce(self):
         """
@@ -465,18 +505,13 @@ class ShotgunSync(object):
         # Although the context should ideally be preserved through the publish data when published, we
         # still need to handle the case where the file may have been submitted directly through Perforce 
         # so will probably still want to have hook for this...
-        #
-        # We could do something intelligent like using the previous context information if this
-        # path has been published before? - would this be in the hook or before that? - Probably try
-        # to construct the best possible context and then allow a hook to create a new context if it needs
-        # to? 
         
-        context =self._app.sgtk.context_from_path(local_path)
+        context = self._app.sgtk.context_from_path(local_path)
                 
         # if we don't have a task but do have a step then try to determine the task from the step:
-        # (TODO) - this logic should be moved to a hook as it  won't work if there are Multiple tasks on 
+        # (TODO) - this logic should be moved to a hook as it won't work if there are Multiple tasks on 
         # the same entity that use the same Step!
-        if not context.task:
+        if context and not context.task:
             if context.entity and context.step:
                 sg_res = self._app.shotgun.find("Task", [["step", "is", context.step], ["entity", "is", context.entity]])
                 if sg_res and len(sg_res) == 1:
@@ -536,10 +571,10 @@ class ShotgunSync(object):
         tank_configs_path = "%s/tank/config/tank_configs.yml" % project_root
         try:
             p4.run_files(tank_configs_path)
-        except P4Exception:
+        except P4Exception, e:
             # bad - file not found!
-            self._app.log_error("Configuration file '%s' does not exist in the Perforce depot: " 
-                           % (p4.errors[0] if p4.errors else e))
+            self._app.log_error("Configuration file '%s' does not exist in the Perforce depot: %s" 
+                           % (tank_configs_path, p4.errors[0] if p4.errors else e))
             return None
 
         # read the pc root path from the config file:

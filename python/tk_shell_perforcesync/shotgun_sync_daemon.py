@@ -47,27 +47,27 @@ class ShotgunSyncDaemon(object):
         Run continuous daemon
         """
         start_change = self.__start_change
-        p4 = None
         while True:
             self.__app.log_info("Checking for new Perforce changes to sync with Shotgun...")
 
-            #p4 = None
+            p4 = None
             try:
-                if not p4 or not p4.connected():                    
-                    # re-connect
-                    # (AD) - test/handle what happens if login times out - should this try to 
-                    # reconnect each time just in case?
-                    p4 = p4_fw.connect(False, self.__p4_user, self.__p4_pass)
+                # re-connect
+                p4 = p4_fw.connect(False, self.__p4_user, self.__p4_pass)
             except TankError, e:
                 self.__app.log_error("Failed to connect to Perforce server: %s" % e)
             else:
-                res = self.__process_next_change(p4, start_change)
-                if isinstance(res, int):
-                    # processed a change so move to the next one:
-                    start_change = res+1
-                    continue
-            #finally:
-            #    p4.disconnect()
+                res = 1
+                while res:
+                    res = self.__process_next_change(p4, start_change)
+                    if isinstance(res, int):
+                        # processed a change so move to the next one:
+                        start_change = res+1
+                    else:
+                        # didn't process anything
+                        break
+            finally:
+                p4.disconnect()
 
             # didn't do anything so sleep for a bit:
             self.__app.log_debug("No new changes found - sleeping for %d seconds" % self._interval)
@@ -93,12 +93,13 @@ class ShotgunSyncDaemon(object):
         p4_change = self.__find_next_submitted_change(p4, max(start_change, p4_counter+1))
         if not p4_change:
             return
+
+        change_id = int(p4_change["change"])
         
         # validate that this change is in fact in this project:
         if not self._p4_sync.is_change_in_context(p4, p4_change):
-            return
-        
-        change_id = int(p4_change["change"])
+            # nothing to do so skip
+            return change_id
         
         # next, create this change in Shotgun in an atomic way:
         sg_change_entity = self._p4_sync.create_sg_entity_for_change(p4_change)
