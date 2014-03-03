@@ -28,13 +28,13 @@ description: "This app contains the sync command used to sync a Perforce change
               
 # Required minimum versions for this item to run
 requires_shotgun_version:
-requires_core_version: "v0.14.12"
-requires_engine_version: 
+requires_core_version: "v0.14.43"
+requires_engine_version: "v0.3.6"
 
 # the engines that this app can operate in:
 supported_engines: ["tk-shell"]
 
 # the frameworks required to run this app
 frameworks:
-    - {"name": "tk-framework-perforce", "version": "v0.0.6"}
+    - {"name": "tk-framework-perforce", "version": "v0.0.7"}
     
