@@ -21,7 +21,6 @@ import sgtk
 from sgtk import TankError
 
 p4_fw = sgtk.platform.get_framework("tk-framework-perforce")
-p4_util = p4_fw.import_module("util")
 from P4 import P4Exception
 
 class ShotgunSync(object):
@@ -367,7 +366,6 @@ class ShotgunSync(object):
         current context's project then create a published file for it and return the
         details. 
         """
-        
         # find the depot root and tk instance for the depot path:
         details = self.__find_file_details(depot_path, p4)
         if not details:
@@ -407,7 +405,7 @@ class ShotgunSync(object):
         publish_name = os.path.basename(proxy_local_path)
         
         # construct full url for the published file:
-        file_url = p4_util.url_from_depot_path(p4, depot_path, file_revision)        
+        file_url = p4_fw.util.url_from_depot_path(depot_path, file_revision)        
         
         # find existing publish entity if there is one:
         pf_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
@@ -495,7 +493,7 @@ class ShotgunSync(object):
         Connect to Perforce
         """
         try:
-            p4 = p4_fw.connect(False, self.__p4_user, self.__p4_pass)
+            p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass)
             return p4
         except:
             self._app.log_exception("Failed to connect!")
