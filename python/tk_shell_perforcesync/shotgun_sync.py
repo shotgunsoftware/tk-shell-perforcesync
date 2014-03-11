@@ -295,7 +295,8 @@ class ShotgunSync(object):
 
     def __process_file_revisions(self, p4, p4_file_details, p4_change):
         """
-        """        
+        Process all file revisions for a change.
+        """
 
         # pull some useful info from the change:
         sg_user = self.__get_sg_user(self._app.sgtk, p4_change["user"])
@@ -304,178 +305,279 @@ class ShotgunSync(object):
         change_desc = p4_change.get("desc", "")
         change_time = datetime.fromtimestamp(int(p4_change["time"]))
 
-        # First:
-        # - filter files to just those that Toolkit can process
-        # - find any existing entities for the files from Shotgun.
-        # - Register a new publish for any new files in Shotgun,  
-        #   separating out any dependency information
-        publish_entities = {} # list of published entities
-        new_publish_dependencies = {} # dependency details for new publishes
-        for path_revision, p4_file in p4_file_details.iteritems():
-
-            (depot_path, file_revision) = path_revision
+        temporary_files = set()
+        try:
             
-            self._app.log_debug("Processing %s#%d" % path_revision)
+            # --------------------------------------------------------------------------------------------
+            # --------------------------------------------------------------------------------------------
+            # FIRST PASS:
+            # - filter files to just those that Toolkit can process
+            # - find any existing entities for the files from Shotgun.
+            # - Register a new publish for any new files in Shotgun,  
+            #   separating out any dependency information
+            publish_entities = {} # list of published entities
+            new_publish_dependencies = {} # dependency details for new publishes
+            new_publish_review_data = {}
             
-            # first, check that the depot path is a Toolkit file:
-            path_is_valid, path_context = self.__validate_depot_path(depot_path, p4) 
-            if not path_is_valid:
-                self._app.log_info("File '%s#%d' is not recognized by toolkit, skipping" % path_revision)
-                continue
-            
-            # find existing publish entity if there is one:
-            sg_published_file = self.__find_publish_entity(depot_path, file_revision)
-            if sg_published_file:
-                publish_entities[path_revision] = sg_published_file
-                self._app.log_info("Published file already exists for %s#%d" % path_revision)
-                continue
-            
-            # Didn't find a published file so lets gather the data ready to be able to create one...
-            #
-            publish_data = {}
-            
-            # load any publish data we have stored for this file:
-            try:
-                publish_data = p4_fw.load_publish_data(depot_path, sg_user, change_client, file_revision)
-            except TankError, e:
-                self._app.log_error("Failed to load publish data for %s#%d: %s" % (depot_path, file_revision, e))
-                continue
-            except Exception, e:
-                self._app.log_exception("Failed to load publish data for %s#%d" % path_revision)
-                continue
-            
-            # try to ensure we have a valid context for the published file:
-            context = publish_data.get("context")
-            if not context:
-                # Fall back to the context that was built from the path
-                context = path_context
-            if not context:
-                self._app.log_error("Failed to determine context to use for %s#%d - unable to register publish!" 
-                                    % path_revision)
-                continue
-            if not context.project:
-                self._app.log_error("Failed to determine project to use for %s#%d - unable to register publish!" 
-                                    % path_revision)
-                continue
-                
-            # update publish data with additional information:
-            publish_data["name"] = os.path.basename(depot_path)            
-            publish_data["path"] = p4_fw.util.url_from_depot_path(depot_path, file_revision)
-            publish_data["version_number"] = file_revision
-            publish_data["comment"] = change_desc # Always use change list description for the comment!
-            publish_data["created_by"] = sg_user
-            publish_data["tk"] = self._app.sgtk
-            publish_data["context"] = context
-
-            publish_time = change_time
-            head_mod_time = p4_file.get("headModTime")
-            if head_mod_time:
-                publish_time = datetime.fromtimestamp(int(head_mod_time))
-            publish_data["created_at"] = publish_time            
-            
-            # extract the dependency data from the publish data - we'll
-            # update this later once everything has been registered           
-            dependency_ids = dependency_paths = []
-            if "dependency_ids" in publish_data:
-                dependency_ids = publish_data["dependency_ids"]
-                del(publish_data["dependency_ids"])
-            if "dependency_paths" in publish_data:
-                dependency_paths = publish_data["dependency_paths"]
-                del(publish_data["dependency_paths"])
-            new_publish_dependencies[path_revision] = {"ids":dependency_ids, "paths":dependency_paths}
-
-            # register the new publish:
-            self._app.log_info("Registering new published file: %s#%d" % path_revision)
-            sg_published_file = None
-            try:
-                # Some notes about using register_publish with this data:
-                # Note: Abstract fields won't get translated - if we need this functionality then 
-                # we'll have to figure out how to handle it for this use case - non-trivial!
-                sg_published_file = sgtk.util.register_publish(**publish_data)
-            except Exception, e:
-                self._app.log_error("Failed to register publish for '%s': %s" % (depot_path, e))
-                continue
-
-            if sg_published_file:
-                publish_entities[path_revision] = {"type":sg_published_file["type"], "id":sg_published_file["id"]}
-
-        # convert all dependency paths into their equivelant Shotgun entities:
-        all_dependency_paths = set()
-        for info in new_publish_dependencies.values():
-            paths = info.get("paths")
-            if paths:
-                all_dependency_paths.update(paths)
-
-        dependency_publishes = {}
-        if all_dependency_paths:
-            # get perforce details for the paths at this change:
-            p4_paths = dict([("%s@%d" % (p, change_id), p) for p in all_dependency_paths])
-            p4_res = p4_fw.util.get_depot_file_details(p4, p4_paths.keys())
+            for path_revision, p4_file in p4_file_details.iteritems():
     
-            # use the revision info retrieved from Perforce to find the
-            # Shotgun entities
-            for depot_path_key, p4_details in p4_res.iteritems():
-                file_revision = p4_details.get("headRev") if p4_details else None
-                if not file_revision:
-                    continue
-                file_revision = int(file_revision)
-                depot_path = p4_paths[depot_path_key]
+                (depot_path, file_revision) = path_revision
                 
-                # find the entity from Shotgun:
+                self._app.log_debug("Processing %s#%d" % path_revision)
+                
+                # first, check that the depot path is a Toolkit file:
+                path_is_valid, path_context = self.__validate_depot_path(depot_path, p4) 
+                if not path_is_valid:
+                    self._app.log_info("File '%s#%d' is not recognized by toolkit, skipping" % path_revision)
+                    continue
+                
+                # find existing publish entity if there is one:
                 sg_published_file = self.__find_publish_entity(depot_path, file_revision)
-                
-                if sg_published_file:
-                    dependency_publishes[depot_path] = sg_published_file
-
-        # update the dependency information in Shotgun where needed for the
-        # newly created entities:
-        pf_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
-        pf_dependency_type = "PublishedFileDependency" if pf_entity_type == "PublishedFile" else "TankDependency"
-        sg_batch_requests = []
+                if not sg_published_file:
+                    # Didn't find a published file so lets gather the data ready to be able to create one...
+                    #
+                    publish_data = {}
+                    
+                    # load any publish data we have stored for this file:
+                    try:
+                        load_res = p4_fw.load_publish_data(depot_path, sg_user, change_client, file_revision)
+                        if load_res and isinstance(load_res, dict):
+                            publish_data = load_res.get("data", {})
+                            temporary_files.update(load_res.get("temp_files", []))
+                    except TankError, e:
+                        self._app.log_error("Failed to load publish data for %s#%d: %s" % (depot_path, file_revision, e))
+                        continue
+                    except Exception, e:
+                        self._app.log_exception("Failed to load publish data for %s#%d" % path_revision)
+                        continue
+                    
+                    # try to ensure we have a valid context for the published file:
+                    context = publish_data.get("context")
+                    if not context:
+                        # Fall back to the context that was built from the path
+                        context = path_context
+                    if not context:
+                        self._app.log_error("Failed to determine context to use for %s#%d - unable to register publish!" 
+                                            % path_revision)
+                        continue
+                    if not context.project:
+                        self._app.log_error("Failed to determine project to use for %s#%d - unable to register publish!" 
+                                            % path_revision)
+                        continue
+                        
+                    # update publish data with additional information:
+                    publish_data["name"] = os.path.basename(depot_path)            
+                    publish_data["path"] = p4_fw.util.url_from_depot_path(depot_path, file_revision)
+                    publish_data["version_number"] = file_revision
+                    publish_data["comment"] = change_desc # Always use change list description for the comment!
+                    publish_data["created_by"] = sg_user
+                    publish_data["tk"] = self._app.sgtk
+                    publish_data["context"] = context
         
-        self._app.log_debug("Updating dependencies...")
-        for path_revision, info in new_publish_dependencies.iteritems():
-            (depot_path, file_revision) = path_revision
+                    publish_time = change_time
+                    head_mod_time = p4_file.get("headModTime")
+                    if head_mod_time:
+                        publish_time = datetime.fromtimestamp(int(head_mod_time))
+                    publish_data["created_at"] = publish_time            
+                    
+                    # extract the dependency data from the publish data - we'll
+                    # update this later once everything has been registered           
+                    dependency_ids = dependency_paths = []
+                    if "dependency_ids" in publish_data:
+                        dependency_ids = publish_data["dependency_ids"]
+                        del(publish_data["dependency_ids"])
+                    if "dependency_paths" in publish_data:
+                        dependency_paths = publish_data["dependency_paths"]
+                        del(publish_data["dependency_paths"])
+                    new_publish_dependencies[path_revision] = {"ids":dependency_ids, "paths":dependency_paths}
+        
+                    # register the new publish:
+                    self._app.log_info("Registering new published file: %s#%d" % path_revision)
+                    sg_published_file = None
+                    try:
+                        # Some notes about using register_publish with this data:
+                        # Note: Abstract fields won't get translated - if we need this functionality then 
+                        # we'll have to figure out how to handle it for this use case - non-trivial!
+                        sg_published_file = sgtk.util.register_publish(**publish_data)
+                    except Exception, e:
+                        self._app.log_error("Failed to register publish for '%s': %s" % (depot_path, e))
+                        continue
+                    
+                    publish_entities[path_revision] = {"type":sg_published_file["type"], "id":sg_published_file["id"]}
+                    
+                    # Finally, look for any review data to be registered for this published file:
+                    review_data = {}
+                    try:
+                        load_res = p4_fw.load_publish_review_data(depot_path, sg_user, change_client, file_revision)
+                        if load_res and isinstance(load_res, dict):
+                            review_data = load_res.get("data")
+                            temporary_files.update(load_res.get("temp_files", []))                        
+                    except TankError, e:
+                        self._app.log_error("Failed to load review data for %s#%d: %s" % (depot_path, file_revision, e))
+                        continue
+                    except Exception, e:
+                        self._app.log_exception("Failed to load review data for %s#%d" % path_revision)
+                        continue
+        
+                    if review_data:
+                        new_publish_review_data[path_revision] = review_data
+    
+                else:
+                    self._app.log_info("Published file already exists for %s#%d" % path_revision)
+                    publish_entities[path_revision] = sg_published_file                
+    
+            # --------------------------------------------------------------------------------------------
+            # --------------------------------------------------------------------------------------------
+            # SECOND PASS:
+            # - convert all dependency paths into their equivelant Shotgun entities:
+            all_dependency_paths = set()
+            for info in new_publish_dependencies.values():
+                paths = info.get("paths")
+                if paths:
+                    all_dependency_paths.update(paths)
+    
+            dependency_publishes = {}
+            if all_dependency_paths:
+                # get perforce details for the paths at this change:
+                p4_paths = dict([("%s@%d" % (p, change_id), p) for p in all_dependency_paths])
+                p4_res = p4_fw.util.get_depot_file_details(p4, p4_paths.keys())
+        
+                # use the revision info retrieved from Perforce to find the
+                # Shotgun entities
+                for depot_path_key, p4_details in p4_res.iteritems():
+                    file_revision = p4_details.get("headRev") if p4_details else None
+                    if not file_revision:
+                        continue
+                    file_revision = int(file_revision)
+                    depot_path = p4_paths[depot_path_key]
+                    
+                    # find the entity from Shotgun:
+                    sg_published_file = self.__find_publish_entity(depot_path, file_revision)
+                    
+                    if sg_published_file:
+                        dependency_publishes[depot_path] = sg_published_file
+    
+            # update the dependency information in Shotgun where needed for the
+            # newly created entities:
+            pf_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
+            pf_dependency_type = "PublishedFileDependency" if pf_entity_type == "PublishedFile" else "TankDependency"
+            sg_batch_requests = []
             
-            dep_ids = set(info.get("ids", []))
-            dep_paths = info.get("paths", [])
-            
-            # convert dependency paths to ids:
-            for dep_path in dep_paths:
-                dep_entity = dependency_publishes.get(dep_path)
-                if not dep_entity:
-                    self._app.log_error("Failed to find Shotgun entity for dependency '%s' when processing %s#%d" 
-                                        % (dep_path, depot_path, file_revision))
+            self._app.log_debug("Updating dependencies...")
+            for path_revision, info in new_publish_dependencies.iteritems():
+                (depot_path, file_revision) = path_revision
+                
+                dep_ids = set(info.get("ids", []))
+                dep_paths = info.get("paths", [])
+                
+                # convert dependency paths to ids:
+                for dep_path in dep_paths:
+                    dep_entity = dependency_publishes.get(dep_path)
+                    if not dep_entity:
+                        self._app.log_error("Failed to find Shotgun entity for dependency '%s' when processing %s#%d" 
+                                            % (dep_path, depot_path, file_revision))
+                        continue
+                    
+                    dep_ids.add(dep_entity["id"])
+                    
+                if not dep_ids:
                     continue
+                    
+                # create sg update data:
+                publish_entity = publish_entities[path_revision]
+                for id in dep_ids:
+                    dependent_entity = {"type":pf_entity_type, "id":id}
+                                    
+                    create_data = None
+                    # handle both new and old style published file entity types - shouldn't be needed
+                    # but best to do just in case!
+                    if pf_entity_type == "PublishedFile":                
+                        create_data = {"published_file": publish_entity, 
+                                       "dependent_published_file": dependent_entity}
+                    else:# pf_entity_type == TankPublishedFile
+                        create_data = {"tank_published_file": publish_entity, 
+                                       "dependent_tank_published_file": dependent_entity}
+                    
+                    # add the request to the list to be processed:
+                    sg_batch_requests.append({"request_type": "create", 
+                                              "entity_type": pf_dependency_type,
+                                              "data":create_data})
+    
+            if sg_batch_requests:
+                self._app.log_debug("Creating %d new dependencies in Shotgun..." % len(sg_batch_requests))
+                self._app.shotgun.batch(sg_batch_requests)                
+    
+            # --------------------------------------------------------------------------------------------
+            # --------------------------------------------------------------------------------------------
+            # THIRD PASS:    
+            # - if any review data was found for the new entities then process it:
+            if new_publish_review_data:
                 
-                dep_ids.add(dep_entity["id"])
-                
-            if not dep_ids:
-                continue
-                
-            # create sg update data:
-            publish_entity = publish_entities[path_revision]
-            for id in dep_ids:
-                dependent_entity = {"type":pf_entity_type, "id":id}
-                                
-                create_data = None
-                # handle both new and old style published file entity types - shouldn't be needed
-                # but best to do just in case!
-                if pf_entity_type == "PublishedFile":                
-                    create_data = {"published_file": publish_entity, 
-                                   "dependent_published_file": dependent_entity}
-                else:# pf_entity_type == TankPublishedFile
-                    create_data = {"tank_published_file": publish_entity, 
-                                   "dependent_tank_published_file": dependent_entity}
-                
-                # add the request to the list to be processed:
-                sg_batch_requests.append({"request_type": "create", 
-                                          "entity_type": pf_dependency_type,
-                                          "data":create_data})
-                
-        if sg_batch_requests:
-            self._app.log_debug("Creating %d new dependencies in Shotgun..." % len(sg_batch_requests))
-            self._app.shotgun.batch(sg_batch_requests)                
+                # first, consolidate data across entities:
+                consolidated_review_data = []
+                for path_revision, data in new_publish_review_data.iteritems():
+    
+                    found_entry = None
+                    for entry in consolidated_review_data:
+                         if entry["data"] == data:
+                             found_entry = entry
+                             break
+                         
+                    if not found_entry:
+                        # new data so add a new entry:
+                        found_entry = {"data":data, "publishes":list()}
+                        consolidated_review_data.append(found_entry)
+                        
+                    found_entry["publishes"].append(publish_entities[path_revision])
+    
+                # and create new Version entities for each consolidated review data:
+                for entry in consolidated_review_data:
+                    
+                    data = entry["data"]
+                    publishes = entry["publishes"]
+                    
+                    # update data:
+                    data["description"] = change_desc # Always use change list description for the comment!
+                    data["user"] = sg_user
+                    data["created_by"] = sg_user
+                    data["created_at"] = change_time
+                    
+                    uploaded_movie_path = None
+                    if "sg_uploaded_movie" in data:
+                        uploaded_movie_path = data["sg_uploaded_movie"]
+                        del(data["sg_uploaded_movie"])
+    
+                    if "published_files" in data:
+                        del(data["published_files"])
+    
+                    if pf_entity_type == "PublishedFile":
+                        data["published_files"] = publishes
+                    else:# == "TankPublishedFile"
+                        # the old tank published file link can only handle a single entity!
+                        data["tank_published_file"] = publishes[0]
+    
+                    try:
+                        # create the entity:                
+                        version_entity = self._app.shotgun.create("Version", data)
+        
+                        if uploaded_movie_path:
+                            # upload the movie:
+                            self._app.shotgun.upload("Version", 
+                                                       version_entity['id'], 
+                                                       uploaded_movie_path, 
+                                                       "sg_uploaded_movie" )
+                    except Exception, e:
+                        self._app.log_error("Failed to create Shotgun Version entity!: %s" % e)
+                            
+        finally:
+            # delete all temp files that were created:
+            for path in temporary_files:
+                if not os.path.exists(path):
+                    continue
+                try:
+                    os.remove(path)
+                except:
+                    pass
                       
         return publish_entities.values()
 
