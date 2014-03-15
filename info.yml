@@ -23,7 +23,7 @@ requires_shotgun_fields:
 
 # More verbose description of this item 
 display_name: "Perforce Shotgun Sync"
-description: "This app contains the sync command used to sync a Perforce change
+description: "This app contains the sync command used to sync Perforce changes
               into Shotgun"
               
 # Required minimum versions for this item to run

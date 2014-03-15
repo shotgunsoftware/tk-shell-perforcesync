@@ -8,8 +8,5 @@
 # agreement to the Shotgun Pipeline Toolkit Source Code License. All rights 
 # not expressly granted therein are reserved by Shotgun Software Inc.
 
-"""
-"""
-
 from .shotgun_sync_daemon import ShotgunSyncDaemon
 from .shotgun_sync import ShotgunSync

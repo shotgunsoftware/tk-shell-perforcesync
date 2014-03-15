@@ -9,6 +9,8 @@
 # not expressly granted therein are reserved by Shotgun Software Inc.
 
 """
+Daemon functionality for the Shotgun sync process.  Runs the sync in a loop at a configured
+time interval
 """
 
 import time
@@ -31,6 +33,13 @@ class ShotgunSyncDaemon(object):
     def __init__(self, app, start_change=None, p4_user=None, p4_pass=None):
         """
         Construction
+        
+        :param app:            The app bundle that constucted this object
+        :param start_change:   The first change to consider syncing - this provides
+                               an easy way to skip a large number of changes that
+                               are known not to contain Toolkit data
+        :param p4_user:        The Perforce user that the command should be run under
+        :param p4_pass:        The Perforce password that the command should be run under
         """
         self.__app = app
         self.__start_change = start_change

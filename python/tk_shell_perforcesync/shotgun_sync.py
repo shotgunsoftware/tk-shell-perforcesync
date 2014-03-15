@@ -9,6 +9,8 @@
 # not expressly granted therein are reserved by Shotgun Software Inc.
 
 """
+Contains functionality to sync a change and all the revisions of files it contains
+with Shotgun
 """
 
 import os
@@ -28,9 +30,16 @@ class ShotgunSync(object):
     Handle syncronisation of Perforce changes with Shotgun
     """
     
+    # (TODO) - this is going to change with the new path cache implementation due in v0.15 of the core!    
+    CONFIG_BACK_MAPPING_FILE_LOCATION = "tank/config/%s" % sgtk.platform.constants.CONFIG_BACK_MAPPING_FILE 
+    
     def __init__(self, app, p4_user=None, p4_pass=None):
         """
         Construction
+        
+        :param app:            The app bundle that constucted this object
+        :param p4_user:        The Perforce user that the command should be run under
+        :param p4_pass:        The Perforce password that the command should be run under        
         """
         self._app = app
         self.__p4_user = p4_user
@@ -40,7 +49,6 @@ class ShotgunSync(object):
         self.__project_roots = set()
         self.__project_pc_roots = {}
         self.__pc_tk_instances = {}
-        self.__sg_user_lookup = {}
         self.__depot_path_details_cache = {}
         
     def sync_changes(self, start_change, end_change):
@@ -128,6 +136,7 @@ class ShotgunSync(object):
         Determine if the specified change is valid for the current context (project).
         This will check that at least one file in the change is within the project root
         
+        :param p4:           The Perforce connection to use
         :param p4_change:    The Perforce changelist to check
         """ 
         for depot_path in p4_change.get("depotFile", []):
@@ -180,7 +189,7 @@ class ShotgunSync(object):
         # it doesn't exist so lets create it:
         sg_change = None
         try:
-            sg_user = self.__get_sg_user(self._app.sgtk, p4_change["user"])        
+            sg_user = self.__get_sg_user(p4_change["user"])        
         
             change_data = {}
             change_data["code"] = change_id
@@ -299,7 +308,7 @@ class ShotgunSync(object):
         """
 
         # pull some useful info from the change:
-        sg_user = self.__get_sg_user(self._app.sgtk, p4_change["user"])
+        sg_user = self.__get_sg_user(p4_change["user"])
         change_id = int(p4_change["change"])        
         change_client = p4_change.get("client", "")
         change_desc = p4_change.get("desc", "")
@@ -589,6 +598,11 @@ class ShotgunSync(object):
         
         Although the context should ideally be preserved through the publish data when published, we
         still need to handle the case where the file may have been submitted directly through Perforce
+        
+        :param depot_path:            The depot path to validate
+        :param p4:                    The Perforce connection to use
+        :returns (Boolean, Context):  True/False if the depot path is a valid Toolkit path, together
+                                      with a context created from the path if it is.
         """
         # find the depot root and tk instance for the depot path:
         details = self.__find_file_details(depot_path, p4)
@@ -640,6 +654,12 @@ class ShotgunSync(object):
 
     def __find_publish_entity(self, depot_path, revision):
         """
+        Find the publish entity for a specific revision of a depot path
+        
+        :param depot_path:    The depot path to check
+        :param revision:      The revision to check
+        :returns dict:        A Shotgun entity dictionary for a PublishedFile
+                              entity if found, otherwise None
         """
         pf_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
         # (TODO) - improve this filter so that it returns less stuff
@@ -661,9 +681,9 @@ class ShotgunSync(object):
         Find the depot project root and tk instance for the specified depot path
         if possible.
         
-        :param depot_path:    Depot path to check
-        :param p4:            Perforce connection to use
-        :returns:             Tuple containing (depot project root, sgtk instance)
+        :param depot_path:        Depot path to check
+        :param p4:                Perforce connection to use
+        :returns (str, Sgtk):     Tuple containing (depot project root, sgtk instance)
         """
         # first, check the cache to see if we found this information previously:
         if depot_path in self.__depot_path_details_cache:
@@ -700,6 +720,8 @@ class ShotgunSync(object):
     def __connect_to_perforce(self):
         """
         Connect to Perforce
+        
+        :returns P4:    A connected Perforce instance if successful
         """
         try:
             p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass)
@@ -708,45 +730,22 @@ class ShotgunSync(object):
             self._app.log_exception("Failed to connect!")
             return None
         
-    def __get_sg_user(self, tk, perforce_user):
+    def __get_sg_user(self, perforce_user):
         """
         Get the Shotgun user for the specified Perforce user
+        
+        :param perforce_user:    The Perforce user to find the corresponding Shotgun user for
+        :returns dict:           A Shotgun entity dictionary for the Shotgun user if found
         """
-        if perforce_user not in self.__sg_user_lookup:
-            # user not in lookup so ask framework:
-            sg_user = p4_fw.get_shotgun_user(perforce_user)
-            self.__sg_user_lookup[perforce_user] = sg_user
-            return sg_user
-        else:
-            return self.__sg_user_lookup[perforce_user]
-        
-    def __get_context_for_path(self, tk, local_path):
-        """
-        Construct a context for the specified local path
-        
-        Although the context should ideally be preserved through the publish data when published, we
-        still need to handle the case where the file may have been submitted directly through Perforce
-        
-        (AD) - this is obviously very fragile so need a way to do this using the depot path instead
-        - maybe be able to set the project root and then set it to depot_project_root?
-        - this would also allow template_from_path to work on depot paths...
-        """
-        context = self._app.sgtk.context_from_path(local_path)
-                
-        # if we don't have a task but do have a step then try to determine the task from the step:
-        # (TODO) - this logic should be moved to a hook (probably in core!) as it won't work if 
-        # there are Multiple tasks on the same entity that use the same Step!
-        if context and not context.task:
-            if context.entity and context.step:
-                sg_res = self._app.shotgun.find("Task", [["step", "is", context.step], ["entity", "is", context.entity]])
-                if sg_res and len(sg_res) == 1:
-                    context = self._app.sgtk.context_from_entity(sg_res[0]["type"], sg_res[0]["id"])
-        
-        return context
+        return p4_fw.get_shotgun_user(perforce_user)
         
     def __get_depot_project_root(self, depot_path, p4):
         """
         Find the depot-relative project root for the specified depot file
+        
+        :param depot_path:    The depot path to find the project root for
+        :param p4:            The Perforce connection to use
+        :returns str:         The depot-relative project root
         """
         # first, check to see if depot_path is under a known project root:
         for pr in self.__project_roots:
@@ -761,8 +760,7 @@ class ShotgunSync(object):
             if not project_root:
                 break
             
-            # (AD) - this is going to change with the new path cache implementation
-            tank_configs_path = "%s/tank/config/tank_configs.yml" % project_root
+            tank_configs_path = "%s/%s" % (project_root, ShotgunSync.CONFIG_BACK_MAPPING_FILE_LOCATION)
             try:
                 # see if this file exists in the depot:
                 p4_res = p4.run_files(tank_configs_path)
@@ -779,13 +777,14 @@ class ShotgunSync(object):
         
         return project_root
     
-    
     def __get_local_pc_root(self, project_root, p4):
         """
-        Determine the local pipeline configuration directory
-        for the given depot project_root... 
+        Determine the local pipeline configuration directory for the given depot project_root
+        
+        :param project_root:    The depot relative project root
+        :param p4:              The Perforce connection to use
+        :returns str:           The local pipeline configuration root directory
         """
-
         # first, check to see if info is in cache:
         pc_root = self.__project_pc_roots.get(project_root)
         if pc_root != None:
@@ -793,7 +792,7 @@ class ShotgunSync(object):
         self.__project_pc_roots[project_root] = ""
         
         # check that the tank_configs.yml file is in the correct place:
-        tank_configs_path = "%s/tank/config/tank_configs.yml" % project_root
+        tank_configs_path = "%s/%s" % (project_root, ShotgunSync.CONFIG_BACK_MAPPING_FILE_LOCATION)        
         try:
             p4.run_files(tank_configs_path)
         except P4Exception, e:
