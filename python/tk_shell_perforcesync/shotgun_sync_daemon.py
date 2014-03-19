@@ -62,7 +62,7 @@ class ShotgunSyncDaemon(object):
             p4 = None
             try:
                 # re-connect
-                p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass)
+                p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass, "")
             except TankError, e:
                 self.__app.log_error("Failed to connect to Perforce server: %s" % e)
             else:

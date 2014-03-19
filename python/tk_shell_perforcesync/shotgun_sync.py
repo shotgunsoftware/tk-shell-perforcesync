@@ -276,7 +276,7 @@ class ShotgunSync(object):
         published_file_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
         if not hasattr(self, "__published_file_field"):
             pf_field = None
-            for field in ["sg_published_files", "sg_publishedfiles"]:
+            for field in ["published_files", "sg_published_files", "sg_publishedfiles"]:
                 try:
                     schema = tk.shotgun.schema_field_read("Revision")[field]
                     if (schema.get("data_type", {}).get("value") == "multi_entity"
@@ -287,7 +287,7 @@ class ShotgunSync(object):
                 except:
                     pass
             # default to the 'correct' field anyway!
-            self.__published_file_field = pf_field or "sg_published_files"
+            self.__published_file_field = pf_field or "published_files"
         # ----------------------------------------------------------------------------------------------                
         
         # build the update data for the change:
@@ -724,7 +724,7 @@ class ShotgunSync(object):
         :returns P4:    A connected Perforce instance if successful
         """
         try:
-            p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass)
+            p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass, "")
             return p4
         except:
             self._app.log_exception("Failed to connect!")
