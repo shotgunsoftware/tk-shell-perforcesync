@@ -139,6 +139,7 @@ class ShotgunSync(object):
         :param p4:           The Perforce connection to use
         :param p4_change:    The Perforce changelist to check
         """ 
+        self._app.log_debug("Checking that change '%s' contains files that are in the current project..." % p4_change["change"])
         for depot_path in p4_change.get("depotFile", []):
 
             # find the depot root and tk instance for the depot path:
@@ -349,7 +350,7 @@ class ShotgunSync(object):
                     
                     # load any publish data we have stored for this file:
                     try:
-                        load_res = p4_fw.load_publish_data(depot_path, sg_user, change_client, file_revision)
+                        load_res = p4_fw.load_publish_data(depot_path, sg_user, change_client, file_revision, p4)
                         if load_res and isinstance(load_res, dict):
                             publish_data = load_res.get("data", {})
                             temporary_files.update(load_res.get("temp_files", []))
@@ -417,7 +418,7 @@ class ShotgunSync(object):
                     # Finally, look for any review data to be registered for this published file:
                     review_data = {}
                     try:
-                        load_res = p4_fw.load_publish_review_data(depot_path, sg_user, change_client, file_revision)
+                        load_res = p4_fw.load_publish_review_data(depot_path, sg_user, change_client, file_revision, p4)
                         if load_res and isinstance(load_res, dict):
                             review_data = load_res.get("data")
                             temporary_files.update(load_res.get("temp_files", []))                        
@@ -690,13 +691,17 @@ class ShotgunSync(object):
             return self.__depot_path_details_cache.get(depot_path)
         self.__depot_path_details_cache[depot_path] = None
         
+        self._app.log_debug("Looking for file details for: '%s'" % depot_path)        
+        
         # Determine the depot project root for this depot file:
         depot_project_root = self.__get_depot_project_root(depot_path, p4)
         if not depot_project_root:
             # didn't find a project root so this file is probably not
             # within a Toolkit data directory!
+            self._app.log_debug(" > No depot root found, depot path is not contained in project storage!")
             return
-
+        self._app.log_debug(" > Depot project root found: '%s'" % depot_project_root)
+        
         # find the pipeline config root from the depot root:
         local_pc_root = self.__get_local_pc_root(depot_project_root, p4)
         if not local_pc_root:
@@ -704,12 +709,19 @@ class ShotgunSync(object):
             self._app.log_error("Failed to locate pipeline configuration for depot project root '%s'" 
                                 % depot_project_root)
             return
-
+        self._app.log_debug(" > Local PC root found: '%s'" % local_pc_root)
+        
         # get a tk instance for this pipeline configuration:
         tk = self.__pc_tk_instances.get(local_pc_root)
         if not tk:
             # create a new api instance:
-            tk = sgtk.sgtk_from_path(local_pc_root)
+            self._app.log_debug(" > Creating TK instance for path: '%s'" % local_pc_root)
+            try:
+                tk = sgtk.sgtk_from_path(local_pc_root)
+            except TankError, e:
+                self._app.log_error(" > Failed to create TK instance for PC root '%s'" % local_pc_root)
+                # this shouldn't happen so raise this error:
+                raise    
             self.__pc_tk_instances[local_pc_root] = tk
 
         res = (depot_project_root, tk)

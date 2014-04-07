@@ -65,6 +65,8 @@ class ShotgunSyncDaemon(object):
                 p4 = p4_fw.connection.connect(False, self.__p4_user, self.__p4_pass, "")
             except TankError, e:
                 self.__app.log_error("Failed to connect to Perforce server: %s" % e)
+            except Exception, e:
+                self.__app.log_exception("Unhandled exception when connecting to Perforce!")
             else:
                 res = 1
                 while res:
@@ -76,7 +78,8 @@ class ShotgunSyncDaemon(object):
                         # didn't process anything
                         break
             finally:
-                p4.disconnect()
+                if p4:
+                    p4.disconnect()
 
             # didn't do anything so sleep for a bit:
             self.__app.log_debug("No new changes found - sleeping for %d seconds" % self._interval)
@@ -142,6 +145,7 @@ class ShotgunSyncDaemon(object):
             end_change =  int(p4_res[0]["change"])
             if end_change < start_change:
                 # nothing new submitted!
+                self.__app.log_debug(" > No new changes found!")
                 return
             
             # Find the next submitted change, skipping any pending or shelved changes:
@@ -163,12 +167,13 @@ class ShotgunSyncDaemon(object):
                         continue
                 
                     # this is the next submitted change
+                    self.__app.log_debug(" > Found change %s" % change)                    
                     return change
             
         except P4Exception, e:
             self.__app.log_error("Failed to find next change to process: %s" % p4.errors[0] if p4.errors else e)
         except Exception, e:
-            self.__app.log_error("Failed to find next change to process: %s" % e)          
+            self.__app.log_error("Failed to find next change to process: %s" % e)
     
     def __retrieve_counter(self, p4):
         """
