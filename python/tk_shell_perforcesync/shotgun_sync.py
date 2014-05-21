@@ -277,10 +277,12 @@ class ShotgunSync(object):
         published_file_entity_type = sgtk.util.get_published_file_entity_type(self._app.sgtk)
         if not hasattr(self, "__published_file_field"):
             pf_field = None
+            revision_schema = self._app.sgtk.shotgun.schema_field_read("Revision")
             for field in ["published_files", "sg_published_files", "sg_publishedfiles"]:
+                schema = revision_schema.get(field)
                 try:
-                    schema = tk.shotgun.schema_field_read("Revision")[field]
-                    if (schema.get("data_type", {}).get("value") == "multi_entity"
+                    if (schema
+                        and schema.get("data_type", {}).get("value") == "multi_entity"
                         and published_file_entity_type in schema.get("properties", {}).get("valid_types", {}).get("value", [])):
                         # ok to use this field!
                         pf_field = field
