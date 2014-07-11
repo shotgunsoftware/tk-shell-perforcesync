@@ -57,7 +57,7 @@ class ShotgunSyncDaemon(object):
         """
         start_change = self.__start_change
         while True:
-            self.__app.log_info("Checking for new Perforce changes to sync with Shotgun...")
+            self.__app.log_debug("Checking for new Perforce changes to sync with Shotgun...")
 
             p4 = None
             try:
