@@ -29,9 +29,18 @@ class ShotgunSync(object):
     """
     Handle syncronisation of Perforce changes with Shotgun
     """
-    
-    # (TODO) - this is going to change with the new path cache implementation due in v0.15 of the core!    
-    CONFIG_BACK_MAPPING_FILE_LOCATION = "tank/config/%s" % sgtk.platform.constants.CONFIG_BACK_MAPPING_FILE 
+    # (TODO) - as of core v0.15 the config back mapping file no longer exists so a different strategy is
+    # needed to determine the server-side project root.
+    #
+    # Currently, this file is used for two things:
+    # - to determine the pipeline config/sgtk instance to use when resolving templates.  This may not be 
+    #   needed if it's assumed that the pc running this command is the correct one to use?
+    # - to determine the toolkit project depot root.  This is needed to be able to resolve depot paths
+    #   through Toolkit templates and also to ensure that only files belonging to the current Toolkit
+    #   project are processed by this daemon.  This also handles multiple branches correctly.
+    #
+    #CONFIG_BACK_MAPPING_FILE_LOCATION = "tank/config/%s" % sgtk.platform.constants.CONFIG_BACK_MAPPING_FILE
+    CONFIG_BACK_MAPPING_FILE_LOCATION = "tank/config/tank_configs.yml" 
     
     def __init__(self, app, p4_user=None, p4_pass=None):
         """
